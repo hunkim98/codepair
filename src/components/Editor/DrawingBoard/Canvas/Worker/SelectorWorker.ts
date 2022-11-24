@@ -1,9 +1,9 @@
-import { Root, Point, Shape } from 'features/docSlices';
-import { ToolType } from 'features/boardSlices';
+import { Root, Point, Shape, Rect } from 'features/docSlices';
+import { Color, ToolType } from 'features/boardSlices';
 import Board from 'components/Editor/DrawingBoard/Canvas/Board';
-import { isInnerBox, cloneBox, isSelectable } from '../utils';
-import Worker from './Worker';
-import * as scheduler from '../scheduler';
+import { isInnerBox } from '../utils';
+import Worker, { MouseMoveCallback, MouseUpCallback } from './Worker';
+import { createRect } from '../rect';
 
 class SelectorWorker extends Worker {
   type = ToolType.Selector;
@@ -12,7 +12,13 @@ class SelectorWorker extends Worker {
 
   board: Board;
 
-  private selectedShape?: { shape: Shape; point: Point };
+  private selectedShape?: Shape;
+
+  private presenceShape?: Shape;
+
+  private isSelectedShapeDeleted: boolean = false;
+
+  private selectorStartPoint: Point = { x: 0, y: 0 };
 
   constructor(update: Function, board: Board) {
     super();
@@ -23,60 +29,62 @@ class SelectorWorker extends Worker {
   mousedown(point: Point): void {
     const target = this.findTarget(point);
     if (target) {
-      this.selectedShape = {
-        shape: target,
-        point,
-      };
+      this.selectedShape = target;
+      this.selectorStartPoint = point;
+      if (target.type === 'rect') {
+        const selectedRectShape = this.selectedShape as Rect;
+        this.presenceShape = createRect(selectedRectShape.points[0], {
+          color: selectedRectShape.color as Color,
+        });
+        this.presenceShape.box.width = selectedRectShape.box.width;
+        this.presenceShape.box.height = selectedRectShape.box.height;
+      }
       return;
     }
 
     this.selectedShape = undefined;
   }
 
-  mousemove(point: Point) {
-    scheduler.reserveTask(point, (tasks: Array<scheduler.Task>) => {
-      if (tasks.length < 2) {
-        return;
+  mousemove(point: Point, callback: MouseMoveCallback) {
+    if (this.selectedShape) {
+      if (!this.isSelectedShapeDeleted) {
+        this.update((root: Root) => {
+          this.deleteByID(root, this.selectedShape!.getID());
+          this.isSelectedShapeDeleted = true;
+          this.board.drawAll(root.shapes);
+        });
       }
-
-      this.update((root: Root) => {
-        if (this.isEmptySelectedShape()) {
-          return;
-        }
-
-        const lastShape = this.getElementByID(root, this.selectedShape!.shape.getID());
-        if (!lastShape || lastShape.type !== 'rect') {
-          return;
-        }
-
-        if (isSelectable(lastShape)) {
-          const pointEnd = tasks[tasks.length - 1];
-          const offsetY = pointEnd.y - this.selectedShape!.point.y;
-          const offsetX = pointEnd.x - this.selectedShape!.point.x;
-          this.selectedShape!.point = pointEnd;
-
-          lastShape.box = {
-            ...cloneBox(lastShape.box),
-            y: lastShape.box.y + offsetY,
-            x: lastShape.box.x + offsetX,
-          };
-
-          lastShape.points[0] = {
-            y: lastShape.points[0].y + offsetY,
-            x: lastShape.points[0].x + offsetX,
-          };
-        }
-        this.board.drawAll(root.shapes);
-      });
-    });
+      if (this.selectedShape.type === 'rect') {
+        const rectShape = this.presenceShape as Rect;
+        const pointOffset: Point = { x: point.x - this.selectorStartPoint.x, y: point.y - this.selectorStartPoint.y };
+        const newPoint: Point = {
+          x: this.selectedShape.box.x + pointOffset.x,
+          y: this.selectedShape.box.y + pointOffset.y,
+        };
+        rectShape.box.x = newPoint.x;
+        rectShape.box.y = newPoint.y;
+        rectShape.points[0].x = newPoint.x;
+        rectShape.points[0].y = newPoint.y;
+        callback({ rect: { ...rectShape } });
+      }
+    }
   }
 
-  mouseup() {
+  mouseup(callback: MouseUpCallback) {
     this.flushTask();
+    callback({});
   }
 
   flushTask() {
-    scheduler.flushTask();
+    if (this.presenceShape) {
+      this.update((root: Root) => {
+        root.shapes.push(this.presenceShape as Rect);
+        this.board.drawAll(root.shapes);
+      });
+    }
+    this.isSelectedShapeDeleted = false;
+    this.selectedShape = undefined;
+    this.presenceShape = undefined;
   }
 
   /**
